@@ -116,7 +116,7 @@ cp -R build/Lumen.app /Applications/
 
 - `.github/workflows/build.yml`：往 `main` 推或开 PR 时跑一遍 `./build.sh`，只做编译校验
 - `.github/workflows/release.yml`：推 `v*` tag 时跑 `./make-dmg.sh`，校验镜像后把 dmg 作为 artifact 上传，并用 `softprops/action-gh-release` 发布 Release（自动生成 release notes）。手动触发（`workflow_dispatch`）则只出 artifact、不建 Release
-- 两个 workflow 都跑在 `macos-14`（arm64）runner 上。因为同时交叉编译 `x86_64`，通用二进制在 Intel 上也能跑
+- 两个 workflow 都跑在 `macos-15`（arm64）runner 上。因为同时交叉编译 `x86_64`，通用二进制在 Intel 上也能跑；`macos-14` 在本仓库不可用（会直接报 `configuration is not supported` 并秒取消）
 - 版本号只有一个来源：打 tag 时取 tag（`v1.4.1` → `1.4.1`），否则用 `build.sh` 里的默认值。两者不一致时以 tag 为准，所以发版前先改 `build.sh` 的 `VERSION`
 
 ## 已知限制
