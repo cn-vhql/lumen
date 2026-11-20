@@ -7,7 +7,10 @@ APP_NAME="Lumen"
 BUILD_DIR="$ROOT/build"
 APP="$BUILD_DIR/$APP_NAME.app"
 BUNDLE_ID="local.lumen.controller"
-VERSION="1.4.0"
+VERSION="${LUMEN_VERSION:-1.4.0}"
+# 默认同时编 arm64 与 x86_64，再用 lipo 合成通用二进制；只想要单架构可以
+# LUMEN_ARCHS=arm64 ./build.sh
+ARCHS="${LUMEN_ARCHS:-arm64 x86_64}"
 
 echo "==> Cleaning"
 rm -rf "$BUILD_DIR"
@@ -22,18 +25,33 @@ fi
 cp "$ROOT/icons/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$ROOT/icons/menubar.png" "$APP/Contents/Resources/menubar.png"
 
-echo "==> Compiling"
-swiftc \
-  -O \
-  -whole-module-optimization \
-  -target arm64-apple-macos13.0 \
-  -framework AppKit \
-  -framework Carbon \
-  -framework CoreAudio \
-  -framework IOKit \
-  -framework ServiceManagement \
-  -o "$APP/Contents/MacOS/$APP_NAME" \
-  "$ROOT"/Sources/*.swift
+echo "==> Compiling ($ARCHS)"
+SLICE_DIR="$(mktemp -d)"
+trap 'rm -rf "$SLICE_DIR"' EXIT
+SLICES=()
+for arch in $ARCHS; do
+    echo "    $arch"
+    swiftc \
+      -O \
+      -whole-module-optimization \
+      -target "$arch-apple-macos13.0" \
+      -framework AppKit \
+      -framework Carbon \
+      -framework CoreAudio \
+      -framework IOKit \
+      -framework ServiceManagement \
+      -o "$SLICE_DIR/$APP_NAME-$arch" \
+      "$ROOT"/Sources/*.swift
+    SLICES+=("$SLICE_DIR/$APP_NAME-$arch")
+done
+
+if [ "${#SLICES[@]}" -gt 1 ]; then
+    echo "==> Lipoing ${#SLICES[@]} slices"
+    lipo -create "${SLICES[@]}" -output "$APP/Contents/MacOS/$APP_NAME"
+else
+    cp "${SLICES[0]}" "$APP/Contents/MacOS/$APP_NAME"
+fi
+chmod 755 "$APP/Contents/MacOS/$APP_NAME"
 
 echo "==> Writing Info.plist"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -62,4 +80,5 @@ echo "==> Code signing (ad-hoc)"
 codesign --force --sign - --timestamp=none "$APP"
 
 echo "==> Done: $APP"
+echo "    arch: $(lipo -archs "$APP/Contents/MacOS/$APP_NAME")"
 du -sh "$APP" | awk '{print "    size:", $1}'

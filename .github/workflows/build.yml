@@ -1,0 +1,20 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compile check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Lumen.app
+        run: |
+          chmod +x build.sh
+          ./build.sh
+          lipo -archs build/Lumen.app/Contents/MacOS/Lumen

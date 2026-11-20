@@ -32,6 +32,8 @@ tools/
   make-icons.swift        生成应用图标与菜单栏图标
   preview-icons.swift     生成图标对比预览图
 build.sh                  构建 app bundle 并做 ad-hoc 签名
+make-dmg.sh               构建并打包成可发布的 dmg
+.github/workflows/        build.yml（编译校验）、release.yml（打 dmg + 发布）
 icons/                    构建用的图标资源（由 tools/make-icons.swift 生成）
 docs/
   technical-notes.md      实现细节与设计取舍
@@ -100,13 +102,22 @@ iconutil -c icns icons/AppIcon.iconset -o icons/AppIcon.icns
 
 ```bash
 ./build.sh                      # 产出 build/Lumen.app
+./make-dmg.sh                   # 再打包成 build/Lumen-<version>.dmg
 cp -R build/Lumen.app /Applications/
 ```
 
-- 用 `swiftc -O -whole-module-optimization` 编译，目标默认 `arm64-apple-macos13.0`；在 Intel Mac 上构建需要改 `build.sh` 里的 `-target`
-- 签名是 `codesign --sign -`（ad-hoc），没有公证。自行构建的 app 直接运行即可；若经过网络传输，可能还需要 `xattr -dr com.apple.quarantine build/Lumen.app`
+- 用 `swiftc -O -whole-module-optimization` 编译。`build.sh` 默认把 `arm64` 与 `x86_64` 各编一份，再用 `lipo` 合成通用二进制；`LUMEN_ARCHS=arm64` 可以只编单架构，`LUMEN_VERSION=1.4.1` 可以覆盖版本号（CI 就是用它把 tag 写进 Info.plist）
+- `make-dmg.sh` 会把 app 和指向 `/Applications` 的软链接放进一个暂存目录，用 `hdiutil` 压成 UDZO 镜像，卷名 `Lumen`
+- 签名是 `codesign --sign -`（ad-hoc），没有公证。自行构建的 app 直接运行即可；从浏览器下载的 dmg 带 quarantine 属性，需要右键→「打开」或 `xattr -dr com.apple.quarantine /Applications/Lumen.app`
 - 依赖 Xcode Command Line Tools 的 `swiftc`：`xcode-select --install`
 - Info.plist 里 `LSUIElement = true`，因此 app 不显示 Dock 图标
+
+## 持续集成
+
+- `.github/workflows/build.yml`：往 `main` 推或开 PR 时跑一遍 `./build.sh`，只做编译校验
+- `.github/workflows/release.yml`：推 `v*` tag 时跑 `./make-dmg.sh`，校验镜像后把 dmg 作为 artifact 上传，并用 `softprops/action-gh-release` 发布 Release（自动生成 release notes）。手动触发（`workflow_dispatch`）则只出 artifact、不建 Release
+- 两个 workflow 都跑在 `macos-14`（arm64）runner 上。因为同时交叉编译 `x86_64`，通用二进制在 Intel 上也能跑
+- 版本号只有一个来源：打 tag 时取 tag（`v1.4.1` → `1.4.1`），否则用 `build.sh` 里的默认值。两者不一致时以 tag 为准，所以发版前先改 `build.sh` 的 `VERSION`
 
 ## 已知限制
 

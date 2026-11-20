@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    name: Build DMG
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Lumen.app and DMG
+        run: |
+          chmod +x build.sh make-dmg.sh
+          # 打 tag 时以 tag 为准（v1.4.0 -> 1.4.0），手动触发则用 build.sh 里的版本号
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            export LUMEN_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          ./make-dmg.sh
+
+      - name: Verify DMG
+        run: |
+          ls -lh build/*.dmg
+          hdiutil verify build/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lumen-dmg
+          path: build/*.dmg
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/*.dmg
+          generate_release_notes: true
+          fail_on_unmatched_files: true

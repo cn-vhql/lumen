@@ -2,6 +2,7 @@
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey)
 ![Language](https://img.shields.io/badge/language-Swift-orange)
+![Release](https://img.shields.io/github/v/release/cn-vhql/lumen)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 **让 Mac mini 的键盘，重新管住外接显示器：亮度、音量、静音，顺手还有代理开关。**
@@ -69,7 +70,19 @@ F1–F6 正好对应 Mac 传统媒体键的位置（F1/F2 亮度、F4 静音、F
 
 ## 上手
 
-仓库提供源码，构建一次即可（需要 Xcode Command Line Tools，不用安装完整 Xcode）：
+### 下载 dmg
+
+到 [Releases](https://github.com/cn-vhql/lumen/releases) 下载最新的 `Lumen-x.y.z.dmg`，打开后把 Lumen 拖进「应用程序」即可。dmg 由 GitHub Actions 在推 tag 时自动构建，内含 Apple Silicon 与 Intel 两套架构。
+
+因为项目没有付费开发者账号，app 是 ad-hoc 签名、没有走苹果公证，首次打开会被 Gatekeeper 拦下。右键点图标选「打开」，或者执行一次：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Lumen.app
+```
+
+### 从源码构建
+
+不放心二进制就自己编（需要 Xcode Command Line Tools，不用安装完整 Xcode）：
 
 ```bash
 xcode-select --install
@@ -78,9 +91,11 @@ cp -R build/Lumen.app /Applications/
 open /Applications/Lumen.app
 ```
 
+`./build.sh` 默认分别编译 arm64 与 x86_64 再合成通用二进制，只想要单架构可以 `LUMEN_ARCHS=arm64 ./build.sh`；`./make-dmg.sh` 会多走一步，在 `build/` 下产出可发布的 dmg。
+
 菜单栏出现橘色太阳图标就说明成功了。配置文件会在首次启动时自动生成；想让它在登录时启动，勾选菜单里的「开机自动启动」。
 
-系统要求：macOS 13 或更新，以及一台支持 DDC/CI 的外接显示器（DisplayPort、HDMI 或经 USB‑C 转接）。默认构建目标是 Apple Silicon；在 Intel Mac 上编译需改 `build.sh` 里的 `-target`。
+系统要求：macOS 13 或更新，以及一台支持 DDC/CI 的外接显示器（DisplayPort、HDMI 或经 USB‑C 转接）。
 
 ## 改快捷键
 
