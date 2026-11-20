@@ -28,6 +28,7 @@ Sources/
   Audio.swift             CoreAudio 系统音量与静音
   Proxy.swift             系统代理读取与切换
   HUD.swift               屏幕下方的浮动提示面板
+  Log.swift               LUMEN_DEBUG=1 时启用的文件日志
 tools/
   make-icons.swift        生成应用图标与菜单栏图标
   preview-icons.swift     生成图标对比预览图
@@ -53,6 +54,15 @@ docs/
 **为什么代理三项一起切**：只开一半协议会让部分流量绕过代理，故障现象很难排查，所以 HTTP / HTTPS / SOCKS 作为一个整体开关。
 
 **为什么显示器要支持重连**：初始化可能在显示器就绪之前跑（登录时、唤醒瞬间、刚插上线）。早期版本在探测失败后把可用状态固定为 false，亮度会一直失效到重启；现在每个入口都会先尝试重连，失败才放弃。
+
+**为什么连接要被主动作废，而不是复用一次成功打开的句柄**：`IOAVService` 只在那条 DP 链路存活期间有效。显示器睡眠、唤醒、链路重训练都会让旧句柄作废，而它往往**不报错**——`IOAVServiceWriteI2C` 照样返回 0，显示器却什么都没收到，表现就是「HUD 动了，亮度没变」。所以：
+
+- `NSApplication.didChangeScreenParametersNotification`、`NSWorkspace.screensDidWakeNotification`、`NSWorkspace.didWakeNotification` 触发时走 `invalidate(reason:)`，直接丢弃句柄重开，不再只是重读数值
+- 写入失败会重开一次重试；再失败就把连接标记为不可用，留给下一次调用重新 `open()`
+- 写入不再立即读回（会拖慢拖拽），而是 150ms 后在同一个串行队列上异步校验一次：显示器读数与期望值相差超过满量程 2% 就判定句柄失效，重开并补写一次
+- 快捷键动作拿不到结果时，HUD 显示「显示器未连接 · 无 DDC 响应」，而不是继续弹亮度条
+
+**为什么失败要有日志**：DDC 的错误只是一个 IOReturn 码，系统日志里查不到 app 的视角。`LUMEN_DEBUG=1` 时会往 `~/Library/Application Support/Lumen/debug.log` 记录 `open` / `writeVCP` / `readVCP` 的返回码和每次重连、校验的判定结果；不设置时完全不写文件。
 
 **为什么 HUD 用非激活面板**：`NSPanel` + `.nonactivatingPanel` 不会抢走当前窗口的键盘焦点，调亮度时不会打断正在输入的内容。
 

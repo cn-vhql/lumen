@@ -40,6 +40,9 @@ final class DDCController {
     private var av: UnsafeMutableRawPointer?
     private var writeFn: WriteI2CFn?
     private var readFn: ReadI2CFn?
+    /// Pending read-back check. Only one is in flight at a time; a newer write cancels
+    /// the previous one, which is what makes slider drags cheap.
+    private var verifyWork: DispatchWorkItem?
 
     private let chipAddress: UInt32 = 0x37
     private let dataAddress: UInt32 = 0x51
@@ -58,15 +61,11 @@ final class DDCController {
     var displayName: String { stateLock.withLock { _displayName } }
 
     private init() {
-        if !open() {
-            publish { _isAvailable = false }
-            return
+        queue.sync {
+            reconnectIfNeeded()
+            guard isAvailable else { return }
+            syncLocked()
         }
-        publish {
-            _isAvailable = true
-            _displayName = DDCController.resolveDisplayName()
-        }
-        syncFromHardware()
     }
 
     /// Updates the published snapshot under the lock. All internal writes go through
@@ -88,10 +87,44 @@ final class DDCController {
     /// Caller must already be on `queue`.
     private func reconnectIfNeeded() {
         guard !isAvailable else { return }
+        forceReopen()
+    }
+
+    /// Throws the cached handle away and builds a new one.
+    ///
+    /// A handle is only valid for as long as the DP link that backs it. Display sleep,
+    /// wake and link retraining all invalidate it, and the old handle then keeps
+    /// accepting writes that the monitor silently drops — which is why the cached
+    /// connection has to be rebuilt proactively instead of trusted once opened.
+    ///
+    /// Caller must already be on `queue`.
+    private func forceReopen() {
+        verifyWork?.cancel()
         releaseConnection()
-        guard open() else { return }
-        publish { _isAvailable = true }
-        publish { _displayName = DDCController.resolveDisplayName() }
+        publish { _isAvailable = false }
+        guard open() else {
+            Log.debug("ddc: reopen found no DDC display")
+            return
+        }
+        publish {
+            _isAvailable = true
+            _displayName = DDCController.resolveDisplayName()
+        }
+        Log.debug("ddc: reopened \(displayName)")
+    }
+
+    /// Drops the cached connection and re-opens it, then re-reads the monitor.
+    ///
+    /// Called when the system reports a screen reconfiguration or a wake: those are
+    /// exactly the moments where the previous handle stops working, and without this
+    /// the app would keep writing to a dead service until it was restarted.
+    func invalidate(reason: String) {
+        queue.sync {
+            Log.debug("ddc: invalidate (\(reason))")
+            forceReopen()
+            guard isAvailable else { return }
+            syncLocked()
+        }
     }
 
     /// Drops the current IOAVService handle. `IOAVServiceCreate*` follows the CF
@@ -124,7 +157,10 @@ final class DDCController {
               let createPtr = CFBundleGetFunctionPointerForName(iokitBundle, "IOAVServiceCreateWithService" as CFString),
               let writePtr = CFBundleGetFunctionPointerForName(iokitBundle, "IOAVServiceWriteI2C" as CFString),
               let readPtr = CFBundleGetFunctionPointerForName(iokitBundle, "IOAVServiceReadI2C" as CFString)
-        else { return false }
+        else {
+            Log.debug("ddc: IOAVService symbols unavailable")
+            return false
+        }
 
         let create = unsafeBitCast(createPtr, to: CreateWithServiceFn.self)
         writeFn = unsafeBitCast(writePtr, to: WriteI2CFn.self)
@@ -133,7 +169,10 @@ final class DDCController {
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault,
                                            IOServiceMatching("DCPAVServiceProxy"),
-                                           &iterator) == KERN_SUCCESS else { return false }
+                                           &iterator) == KERN_SUCCESS else {
+            Log.debug("ddc: DCPAVServiceProxy lookup failed")
+            return false
+        }
         defer { IOObjectRelease(iterator) }
 
         var service = IOIteratorNext(iterator)
@@ -150,8 +189,10 @@ final class DDCController {
                 if let v = readVCPRaw(VCP.volume), v.max > 0 {
                     publish { _volumeMax = v.max }
                 }
+                Log.debug("ddc: open ok brightnessMax=\(probe.max)")
                 return true
             }
+            Log.debug("ddc: candidate display did not answer VCP 0x10")
             // Rejected candidate: release it, otherwise probing a multi-display
             // setup would leak one IOAVService per display on every reconnect.
             av = nil
@@ -173,6 +214,9 @@ final class DDCController {
         let result = packet.withUnsafeMutableBufferPointer { buffer in
             writeFn(av, chipAddress, dataAddress, buffer.baseAddress, length)
         }
+        if result != 0 {
+            Log.debug("ddc: writeVCP \(hex(code))=\(value) returned \(String(format: "0x%08x", result))")
+        }
         return result == 0
     }
 
@@ -187,16 +231,25 @@ final class DDCController {
         let wrote = request.withUnsafeMutableBufferPointer { buffer in
             writeFn(av, chipAddress, dataAddress, buffer.baseAddress, requestLength)
         }
-        guard wrote == 0 else { return nil }
+        guard wrote == 0 else {
+            Log.debug("ddc: readVCP \(hex(code)) request write returned \(String(format: "0x%08x", wrote))")
+            return nil
+        }
 
         var reply = [UInt8](repeating: 0, count: 11)
         let replyLength: UInt32 = 11
         let read = reply.withUnsafeMutableBufferPointer { buffer in
             readFn(av, chipAddress, dataAddress, buffer.baseAddress, replyLength)
         }
-        guard read == 0 else { return nil }
+        guard read == 0 else {
+            Log.debug("ddc: readVCP \(hex(code)) read returned \(String(format: "0x%08x", read))")
+            return nil
+        }
         // Sanity: a valid DDC/CI reply starts with the monitor's source address.
-        guard reply[0] == sourceAddress || reply[0] == 0x6E else { return nil }
+        guard reply[0] == sourceAddress || reply[0] == 0x6E else {
+            Log.debug("ddc: readVCP \(hex(code)) bad reply source 0x\(String(format: "%02x", reply[0]))")
+            return nil
+        }
 
         let maxValue = UInt16(reply[6]) << 8 | UInt16(reply[7])
         let current = UInt16(reply[8]) << 8 | UInt16(reply[9])
@@ -208,31 +261,34 @@ final class DDCController {
 
     /// Pulls current values from the monitor. Safe to call from any thread.
     func syncFromHardware() {
-        queue.sync {
-            reconnectIfNeeded()
-            guard isAvailable else { return }
-            for attempt in 0..<3 {
-                if let probe = readVCPRaw(VCP.brightness), probe.max > 0 {
-                    let ratio = clamp(Double(probe.cur) / Double(probe.max))
-                    publish {
-                        _brightnessMax = probe.max
-                        _brightness = ratio
-                    }
-                    break
+        queue.sync { syncLocked() }
+    }
+
+    /// Caller must already be on `queue`.
+    private func syncLocked() {
+        reconnectIfNeeded()
+        guard isAvailable else { return }
+        for attempt in 0..<3 {
+            if let probe = readVCPRaw(VCP.brightness), probe.max > 0 {
+                let ratio = clamp(Double(probe.cur) / Double(probe.max))
+                publish {
+                    _brightnessMax = probe.max
+                    _brightness = ratio
                 }
-                if attempt < 2 { usleep(40_000) }
+                break
             }
-            for attempt in 0..<3 {
-                if let probe = readVCPRaw(VCP.volume), probe.max > 0 {
-                    let ratio = clamp(Double(probe.cur) / Double(probe.max))
-                    publish {
-                        _volumeMax = probe.max
-                        _monitorVolume = ratio
-                    }
-                    break
+            if attempt < 2 { usleep(40_000) }
+        }
+        for attempt in 0..<3 {
+            if let probe = readVCPRaw(VCP.volume), probe.max > 0 {
+                let ratio = clamp(Double(probe.cur) / Double(probe.max))
+                publish {
+                    _volumeMax = probe.max
+                    _monitorVolume = ratio
                 }
-                if attempt < 2 { usleep(40_000) }
+                break
             }
+            if attempt < 2 { usleep(40_000) }
         }
     }
 
@@ -243,16 +299,11 @@ final class DDCController {
             guard isAvailable else { return false }
             let normalized = clamp(value)
             let raw = UInt16((normalized * Double(brightnessMax)).rounded())
-            var ok = false
-            for attempt in 0..<3 {
-                if writeVCPRaw(VCP.brightness, raw) { ok = true; break }
-                if attempt < 2 { usleep(30_000) }
-            }
-            if ok {
-                publish { _brightness = normalized }
-                lastWriteAt = Date()
-            }
-            return ok
+            guard writeWithRecovery(VCP.brightness, raw) else { return false }
+            publish { _brightness = normalized }
+            lastWriteAt = Date()
+            scheduleVerification(VCP.brightness, raw)
+            return true
         }
     }
 
@@ -263,18 +314,72 @@ final class DDCController {
             guard isAvailable else { return false }
             let normalized = clamp(value)
             let raw = UInt16((normalized * Double(volumeMax)).rounded())
-            var ok = false
-            for attempt in 0..<3 {
-                if writeVCPRaw(VCP.volume, raw) { ok = true; break }
-                if attempt < 2 { usleep(30_000) }
-            }
-            if ok {
-                publish { _monitorVolume = normalized }
-                lastWriteAt = Date()
-            }
-            return ok
+            guard writeWithRecovery(VCP.volume, raw) else { return false }
+            publish { _monitorVolume = normalized }
+            lastWriteAt = Date()
+            scheduleVerification(VCP.volume, raw)
+            return true
         }
     }
+
+    /// Writes a VCP value, rebuilding the connection once if the first attempts fail.
+    ///
+    /// `IOAVServiceWriteI2C` reports nothing more useful than an IOReturn code, and a
+    /// handle whose link was torn down can still return success while the monitor drops
+    /// the packet. Retrying on a fresh handle covers both cases; if that also fails the
+    /// connection is marked dead so the next call tries `open()` again.
+    ///
+    /// Caller must already be on `queue`.
+    private func writeWithRecovery(_ code: UInt8, _ value: UInt16) -> Bool {
+        if writeOnce(code, value) { return true }
+        Log.debug("ddc: write \(hex(code)) failed, reopening")
+        forceReopen()
+        guard isAvailable else { return false }
+        if writeOnce(code, value) { return true }
+        Log.debug("ddc: write \(hex(code)) failed twice, marking unavailable")
+        verifyWork?.cancel()
+        releaseConnection()
+        publish { _isAvailable = false }
+        return false
+    }
+
+    private func writeOnce(_ code: UInt8, _ value: UInt16) -> Bool {
+        for attempt in 0..<3 {
+            if writeVCPRaw(code, value) { return true }
+            if attempt < 2 { usleep(30_000) }
+        }
+        return false
+    }
+
+    /// Reads the value back shortly after a write.
+    ///
+    /// A monitor that accepted the write reports the new value; one whose link is gone
+    /// keeps reporting the old one, which is the only observable symptom of a stale
+    /// handle. Runs off the write path so a slider drag does not pay for the round trip.
+    ///
+    /// Caller must already be on `queue`.
+    private func scheduleVerification(_ code: UInt8, _ expected: UInt16) {
+        verifyWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.verify(code, expected)
+        }
+        verifyWork = work
+        queue.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    /// Caller must already be on `queue`.
+    private func verify(_ code: UInt8, _ expected: UInt16) {
+        guard isAvailable, let probe = readVCPRaw(code), probe.max > 0 else { return }
+        // Monitors round and clamp; within 2% of full scale still counts as applied.
+        let tolerance = max(2, Int(probe.max) / 50)
+        guard abs(Int(probe.cur) - Int(expected)) > tolerance else { return }
+        Log.debug("ddc: verify \(hex(code)) expected=\(expected) actual=\(probe.cur), reopening")
+        forceReopen()
+        guard isAvailable else { return }
+        _ = writeOnce(code, expected)
+    }
+
+    private func hex(_ code: UInt8) -> String { String(format: "0x%02x", code) }
 
     /// Re-reads hardware if nothing was written recently, so hotkey steps start from
     /// the monitor's real value even after external changes (display buttons, another app).
@@ -297,31 +402,37 @@ final class DDCController {
         lastWriteAt = Date()
     }
 
-    func stepBrightness(by delta: Double) {
+    /// Returns false when the display could not be reached, so the caller can say so
+    /// instead of showing a level that never reached the monitor.
+    @discardableResult
+    func stepBrightness(by delta: Double) -> Bool {
         queue.sync {
             reconnectIfNeeded()
-            guard isAvailable else { return }
+            guard isAvailable else { return false }
             refreshIfStale()
             let normalized = clamp(brightness + delta)
             let raw = UInt16((normalized * Double(brightnessMax)).rounded())
-            if writeVCPRaw(VCP.brightness, raw) {
-                publish { _brightness = normalized }
-                lastWriteAt = Date()
-            }
+            guard writeWithRecovery(VCP.brightness, raw) else { return false }
+            publish { _brightness = normalized }
+            lastWriteAt = Date()
+            scheduleVerification(VCP.brightness, raw)
+            return true
         }
     }
 
-    func stepMonitorVolume(by delta: Double) {
+    @discardableResult
+    func stepMonitorVolume(by delta: Double) -> Bool {
         queue.sync {
             reconnectIfNeeded()
-            guard isAvailable else { return }
+            guard isAvailable else { return false }
             refreshIfStale()
             let normalized = clamp(monitorVolume + delta)
             let raw = UInt16((normalized * Double(volumeMax)).rounded())
-            if writeVCPRaw(VCP.volume, raw) {
-                publish { _monitorVolume = normalized }
-                lastWriteAt = Date()
-            }
+            guard writeWithRecovery(VCP.volume, raw) else { return false }
+            publish { _monitorVolume = normalized }
+            lastWriteAt = Date()
+            scheduleVerification(VCP.volume, raw)
+            return true
         }
     }
 

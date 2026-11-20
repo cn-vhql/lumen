@@ -49,6 +49,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             selector: #selector(screenConfigurationChanged),
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil)
+        // Sleep/wake breaks the DDC link without a screen-parameter change in some
+        // cases, so listen for those as well; both handlers rebuild the connection.
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self,
+                selector: #selector(systemDidWake),
+                name: name,
+                object: nil)
+        }
     }
 
     // MARK: - Status item
@@ -345,7 +354,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func resync() {
-        ddc.syncFromHardware()
+        // The menu entry exists so the user can recover from exactly the case this
+        // fixes: a display that re-enumerated behind a stale handle. Rebuild, don't
+        // just re-read.
+        ddc.invalidate(reason: "manual resync")
         rebuildMenuItems()
     }
 
@@ -361,7 +373,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func screenConfigurationChanged() {
-        ddc.syncFromHardware()
+        // Rebuild rather than just re-read: after a link retrain the cached
+        // IOAVService keeps accepting writes that the monitor drops, so a resync on
+        // the old handle would report stale values and change nothing.
+        ddc.invalidate(reason: "screen parameters changed")
+    }
+
+    @objc private func systemDidWake() {
+        ddc.invalidate(reason: "system woke")
     }
 
     // MARK: - Menu delegate
@@ -406,28 +425,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     /// Appends to a debug log so hotkey delivery can be verified without a debugger.
-    private func debugLog(_ message: String) {
-        guard ProcessInfo.processInfo.environment["LUMEN_DEBUG"] != nil else { return }
-        let url = Configuration.supportDirectory.appendingPathComponent("debug.log")
-        let line = "\(Date().timeIntervalSince1970) \(message)\n"
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(Data(line.utf8))
-            try? handle.close()
-        } else {
-            try? Data(line.utf8).write(to: url)
-        }
+    private func debugLog(_ message: @autoclosure () -> String) {
+        Log.debug(message())
     }
 
     private func handle(_ action: HotkeyAction) {
         debugLog("handle \(action.rawValue)")
         switch action {
         case .brightnessUp:
-            ddc.stepBrightness(by: configuration.brightnessStep)
-            hud.show(kind: .brightness, level: ddc.brightness)
+            showBrightness(step: configuration.brightnessStep)
         case .brightnessDown:
-            ddc.stepBrightness(by: -configuration.brightnessStep)
-            hud.show(kind: .brightness, level: ddc.brightness)
+            showBrightness(step: -configuration.brightnessStep)
         case .volumeUp, .volumeDown:
             let delta = action == .volumeUp ? configuration.volumeStep : -configuration.volumeStep
             switch configuration.volumeTarget {
@@ -435,15 +443,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 audio.stepVolume(by: delta)
                 hud.show(kind: .volume, level: audio.volume ?? 0)
             case .monitor:
-                ddc.stepMonitorVolume(by: delta)
-                hud.show(kind: .monitorVolume, level: ddc.monitorVolume)
+                showMonitorVolume(step: delta)
             }
         case .monitorVolumeUp:
-            ddc.stepMonitorVolume(by: configuration.volumeStep)
-            hud.show(kind: .monitorVolume, level: ddc.monitorVolume)
+            showMonitorVolume(step: configuration.volumeStep)
         case .monitorVolumeDown:
-            ddc.stepMonitorVolume(by: -configuration.volumeStep)
-            hud.show(kind: .monitorVolume, level: ddc.monitorVolume)
+            showMonitorVolume(step: -configuration.volumeStep)
         case .toggleMute:
             audio.toggleMute()
             let muted = audio.isMuted
@@ -452,6 +457,25 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             refreshMuteRow()
         case .openPanel:
             statusItem.button?.performClick(nil)
+        }
+    }
+
+    /// Steps the brightness and reports the result. A DDC write can fail without any
+    /// visible symptom — the bar would still animate — so a failure gets its own HUD
+    /// instead of a level the monitor never received.
+    private func showBrightness(step: Double) {
+        if ddc.stepBrightness(by: step) {
+            hud.show(kind: .brightness, level: ddc.brightness)
+        } else {
+            hud.showStatus(kind: .unavailable, detail: "无 DDC 响应")
+        }
+    }
+
+    private func showMonitorVolume(step: Double) {
+        if ddc.stepMonitorVolume(by: step) {
+            hud.show(kind: .monitorVolume, level: ddc.monitorVolume)
+        } else {
+            hud.showStatus(kind: .unavailable, detail: "无 DDC 响应")
         }
     }
 

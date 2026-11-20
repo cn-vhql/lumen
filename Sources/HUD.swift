@@ -9,6 +9,8 @@ final class HUDWindow: NSPanel {
         case monitorVolume
         case mute(Bool)
         case proxy(Bool)
+        /// Shown when a hotkey could not reach the display at all.
+        case unavailable
 
         var symbolName: String {
             switch self {
@@ -16,6 +18,7 @@ final class HUDWindow: NSPanel {
             case .volume, .monitorVolume: return "speaker.wave.2.fill"
             case .mute(let muted): return muted ? "speaker.slash.fill" : "speaker.wave.2.fill"
             case .proxy(let on): return on ? "network.badge.shield.half.filled" : "network.slash"
+            case .unavailable: return "display.trianglebadge.exclamationmark"
             }
         }
 
@@ -26,6 +29,7 @@ final class HUDWindow: NSPanel {
             case .monitorVolume: return "显示器音量"
             case .mute(let muted): return muted ? "已静音" : "取消静音"
             case .proxy(let on): return on ? "代理已开启" : "代理已关闭"
+            case .unavailable: return "显示器未连接"
             }
         }
     }
