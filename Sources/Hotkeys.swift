@@ -126,8 +126,10 @@ struct Configuration: Codable {
     static var `default`: Configuration {
         Configuration(
             bindings: [
-                HotkeyAction.brightnessUp.rawValue: HotkeyBinding(key: .f1, modifiers: .defaultSet),
-                HotkeyAction.brightnessDown.rawValue: HotkeyBinding(key: .f2, modifiers: .defaultSet),
+                // F1 dims and F2 brightens, following the symbols printed on Apple
+                // keyboards: getting this backwards is the first thing a new user notices.
+                HotkeyAction.brightnessUp.rawValue: HotkeyBinding(key: .f2, modifiers: .defaultSet),
+                HotkeyAction.brightnessDown.rawValue: HotkeyBinding(key: .f1, modifiers: .defaultSet),
                 HotkeyAction.volumeDown.rawValue: HotkeyBinding(key: .f5, modifiers: .defaultSet),
                 HotkeyAction.volumeUp.rawValue: HotkeyBinding(key: .f6, modifiers: .defaultSet),
                 HotkeyAction.toggleMute.rawValue: HotkeyBinding(key: .f4, modifiers: .defaultSet),

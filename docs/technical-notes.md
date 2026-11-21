@@ -73,8 +73,8 @@ docs/
 ```json
 {
   "bindings": {
-    "brightnessUp":   { "key": 122, "modifiers": 512 },
-    "brightnessDown": { "key": 120, "modifiers": 512 },
+    "brightnessUp":   { "key": 120, "modifiers": 512 },
+    "brightnessDown": { "key": 122, "modifiers": 512 },
     "volumeDown":     { "key": 96,  "modifiers": 512 },
     "volumeUp":       { "key": 97,  "modifiers": 512 },
     "toggleMute":     { "key": 118, "modifiers": 512 },
